@@ -6,6 +6,7 @@ set -euo pipefail
 
 PROFILES_DIR="${HOME}/.claude-accounts"
 CLAUDE_JSON="${HOME}/.claude.json"
+STATS_CACHE="${HOME}/.claude/stats-cache.json"
 
 # Colors
 RED='\033[0;31m'
@@ -19,7 +20,25 @@ mkdir -p "$PROFILES_DIR"
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
-profile_path() { echo "${PROFILES_DIR}/${1}.json"; }
+profile_path()       { echo "${PROFILES_DIR}/${1}.json"; }
+stats_cache_path()   { echo "${PROFILES_DIR}/${1}.stats-cache.json"; }
+
+save_stats_cache() {
+  local name="$1"
+  [[ -f "$STATS_CACHE" ]] && cp "$STATS_CACHE" "$(stats_cache_path "$name")"
+}
+
+restore_stats_cache() {
+  local name="$1"
+  local src
+  src=$(stats_cache_path "$name")
+  if [[ -f "$src" ]]; then
+    cp "$src" "$STATS_CACHE"
+  else
+    # No saved cache for this account — start fresh so old usage doesn't bleed over
+    echo '{}' > "$STATS_CACHE"
+  fi
+}
 
 current_account() {
   local marker="${PROFILES_DIR}/.current"
@@ -79,6 +98,7 @@ cmd_save() {
   dest=$(profile_path "$name")
 
   cp "$CLAUDE_JSON" "$dest"
+  save_stats_cache "$name"
   set_current "$name"
   echo -e "${GREEN}Saved${RESET} current credentials as '${BOLD}${name}${RESET}'."
 }
@@ -95,12 +115,18 @@ cmd_use() {
     exit 1
   fi
 
+  # Save current account's stats before switching
+  local prev
+  prev=$(current_account)
+  [[ -n "$prev" ]] && save_stats_cache "$prev"
+
   # Back up current credentials before switching
   if [[ -f "$CLAUDE_JSON" ]]; then
     cp "$CLAUDE_JSON" "${CLAUDE_JSON}.backup"
   fi
 
   cp "$src" "$CLAUDE_JSON"
+  restore_stats_cache "$name"
   set_current "$name"
   echo -e "${GREEN}Switched${RESET} to account '${BOLD}${name}${RESET}'."
   echo -e "  Previous credentials backed up to ${YELLOW}~/.claude.json.backup${RESET}"
@@ -142,6 +168,7 @@ cmd_add() {
   fi
 
   cp "$CLAUDE_JSON" "$dest"
+  save_stats_cache "$name"
   set_current "$name"
   echo -e "\n${GREEN}Account '${BOLD}${name}${RESET}${GREEN}' saved successfully.${RESET}"
 }
@@ -161,6 +188,7 @@ cmd_remove() {
   [[ "${confirm,,}" != "y" ]] && { echo "Aborted."; exit 0; }
 
   rm "$target"
+  rm -f "$(stats_cache_path "$name")"
 
   # Clear .current marker if removed account was active
   if [[ "$(current_account)" == "$name" ]]; then

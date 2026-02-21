@@ -31,12 +31,15 @@ source ~/.zshrc
 Claude Code stores your active credentials in `~/.claude.json`. This script saves snapshots of that file as named profiles in `~/.claude-accounts/`. Switching accounts is as simple as copying the right profile back to `~/.claude.json`.
 
 ```
-~/.claude.json               ← active credentials (used by Claude Code)
-~/.claude.json.backup        ← auto-backup before each switch
+~/.claude.json                        ← active credentials (used by Claude Code)
+~/.claude/stats-cache.json            ← active usage stats (used by Claude Code)
+~/.claude.json.backup                 ← auto-backup before each switch
 ~/.claude-accounts/
-  work.json                  ← saved profile
-  personal.json              ← saved profile
-  .current                   ← tracks the active profile name
+  work.json                           ← saved credentials profile
+  work.stats-cache.json               ← saved usage stats for "work"
+  personal.json                       ← saved credentials profile
+  personal.stats-cache.json           ← saved usage stats for "personal"
+  .current                            ← tracks the active profile name
 ```
 
 ## Commands
@@ -102,4 +105,5 @@ claude-accounts remove personal
 - Every time you run `use`, your current `~/.claude.json` is backed up to `~/.claude.json.backup` before switching.
 - The `add` command temporarily strips auth keys from `~/.claude.json` (using `jq`) to force a fresh login, while preserving other Claude settings like theme and preferences.
 - If `jq` is not installed, `add` falls back to wiping `~/.claude.json` entirely before prompting for login.
+- On `use`, the current account's stats are saved before switching, so each account maintains its own independent usage history.
 - Profile files contain credentials — keep `~/.claude-accounts/` private and do not commit it to version control.
