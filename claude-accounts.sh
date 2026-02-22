@@ -39,6 +39,32 @@ account_data()   { echo "${PROFILES_DIR}/${1}/data"; }
 account_config() { echo "${PROFILES_DIR}/${1}/data/.claude.json"; }
 account_exists() { [[ -d "$(account_data "$1")" && -f "$(account_config "$1")" ]]; }
 
+# Ensure the account's ide/ directory is a symlink to the global ~/.claude/ide/
+# so that IDE integrations (JetBrains, VS Code) work with CLAUDE_CONFIG_DIR.
+# The IDE plugin writes lock files to ~/.claude/ide/ regardless of CLAUDE_CONFIG_DIR,
+# so we need the account's data dir to point there.
+ensure_ide_symlink() {
+  local data="$1"
+  local global_ide="${CLAUDE_DIR}/ide"
+
+  mkdir -p "$global_ide"
+
+  # Already a correct symlink — nothing to do
+  if [[ -L "${data}/ide" ]]; then
+    local current_target
+    current_target=$(readlink "${data}/ide")
+    [[ "$current_target" == "$global_ide" ]] && return
+    rm -f "${data}/ide"
+  fi
+
+  # Real directory with stale lock files — remove it
+  if [[ -d "${data}/ide" ]]; then
+    rm -rf "${data}/ide"
+  fi
+
+  ln -s "$global_ide" "${data}/ide"
+}
+
 require_name() {
   if [[ -z "${1:-}" ]]; then
     echo -e "${RED}Error:${RESET} account name is required."
@@ -156,9 +182,10 @@ cmd_save() {
   [[ -L "$src_json" ]] && src_json=$(readlink "$src_json")
   [[ -L "$src_dir" ]]  && src_dir=$(readlink "$src_dir")
 
-  # Copy data directory contents
+  # Copy data directory contents (skip ide/ — it will be symlinked to the global one)
   if [[ -d "$src_dir" ]]; then
     cp -a "${src_dir}/." "${acct}/data/"
+    rm -rf "${acct}/data/ide"
   fi
 
   # Copy credentials
@@ -229,6 +256,9 @@ cmd_env() {
   local data
   data=$(account_data "$name")
 
+  # Ensure IDE integration works with CLAUDE_CONFIG_DIR
+  ensure_ide_symlink "$data"
+
   # Output export statement for eval
   echo "export CLAUDE_CONFIG_DIR=\"${data}\""
 }
@@ -247,6 +277,9 @@ cmd_run() {
 
   local data
   data=$(account_data "$name")
+
+  # Ensure IDE integration works with CLAUDE_CONFIG_DIR
+  ensure_ide_symlink "$data"
 
   # Launch claude with the account's config dir
   CLAUDE_CONFIG_DIR="${data}" exec claude "$@"
