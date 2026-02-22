@@ -1,73 +1,84 @@
 # claude-accounts
 
-A bash script to manage multiple Claude Code CLI accounts and switch between them easily.
+A bash script to manage multiple Claude Code CLI accounts with full data isolation between accounts.
+
+## The Problem
+
+Claude Code stores credentials in `~/.claude.json` and all session data (history, telemetry, usage stats, project data) in `~/.claude/`. Without isolation, switching accounts by swapping only the credentials file causes:
+
+- **Mixed history** — conversations from one account appear in the other
+- **Cross-account telemetry** — activity gets attributed to the wrong account on claude.ai
+- **Shared usage stats** — usage counters bleed between accounts
+- **Shared settings** — permissions and preferences aren't per-account
+
+## How It Works
+
+Each account gets a fully isolated directory containing both its credentials and all its Claude data. Symlinks point `~/.claude.json` and `~/.claude/` to the active account's directory. Switching accounts just updates the symlink targets — no data is copied or shared.
+
+```
+~/.claude.json          → symlink → ~/.claude-accounts/<active>/config.json
+~/.claude/              → symlink → ~/.claude-accounts/<active>/data/
+
+~/.claude-accounts/
+  work/
+    config.json         ← credentials for "work"
+    data/               ← all Claude data for "work" (history, telemetry, settings, etc.)
+  personal/
+    config.json         ← credentials for "personal"
+    data/               ← all Claude data for "personal"
+  .current              ← tracks the active account name
+```
 
 ## Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/user/claude-code-multiple-account.git
+
 # Make the script executable
-chmod +x ~/claude-accounts.sh
+chmod +x claude-code-multiple-account/claude-accounts.sh
 
 # Add alias to your shell (add to ~/.zshrc or ~/.bashrc)
-alias claude-accounts='~/claude-accounts.sh'
+alias claude-accounts='~/path/to/claude-accounts.sh'
 
 # Reload shell
 source ~/.zshrc
 ```
 
-> **Optional:** Copy to a directory in your `$PATH` for global access:
-> ```bash
-> sudo cp ~/claude-accounts.sh /usr/local/bin/claude-accounts
-> ```
-
 ## Requirements
 
 - macOS / Linux with `bash` or `zsh`
 - [Claude Code CLI](https://claude.ai/code) installed (`claude` command available)
-- `jq` *(optional but recommended)* — used to strip only auth keys on `add`, instead of wiping the whole config
-
-## How it works
-
-Claude Code stores your active credentials in `~/.claude.json`. This script saves snapshots of that file as named profiles in `~/.claude-accounts/`. Switching accounts is as simple as copying the right profile back to `~/.claude.json`.
-
-```
-~/.claude.json                        ← active credentials (used by Claude Code)
-~/.claude/stats-cache.json            ← active usage stats (used by Claude Code)
-~/.claude.json.backup                 ← auto-backup before each switch
-~/.claude-accounts/
-  work.json                           ← saved credentials profile
-  work.stats-cache.json               ← saved usage stats for "work"
-  personal.json                       ← saved credentials profile
-  personal.stats-cache.json           ← saved usage stats for "personal"
-  .current                            ← tracks the active profile name
-```
+- `jq` *(optional)* — used to verify login success in `add`
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `claude-accounts list` | Show all saved accounts (`*` marks the active one) |
-| `claude-accounts save <name>` | Save current `~/.claude.json` as a named profile |
+| `claude-accounts save <name>` | Save current login as a named account (run this first!) |
 | `claude-accounts use <name>` | Switch to a saved account |
-| `claude-accounts add <name>` | Open Claude for a fresh login and save as a new profile |
-| `claude-accounts remove <name>` | Delete a saved profile |
-| `claude-accounts current` | Show the currently active account name |
+| `claude-accounts add <name>` | Log in with a new account and save it |
+| `claude-accounts list` | Show all saved accounts |
+| `claude-accounts current` | Show the active account |
+| `claude-accounts remove <name>` | Delete a saved account and all its data |
 | `claude-accounts help` | Show usage information |
 
 ## Usage
 
-### First time setup — save your existing login
+### First-time setup — save your existing login
 
 ```bash
 claude-accounts save work
 ```
+
+This moves your existing `~/.claude.json` and `~/.claude/` into `~/.claude-accounts/work/` and creates symlinks. This is a one-time migration.
 
 ### Add a second account
 
 ```bash
 claude-accounts add personal
 # Opens Claude Code → log in with your second account → /exit
-# Credentials are saved automatically as "personal"
+# Credentials and data are saved as "personal"
 ```
 
 ### Switch between accounts
@@ -97,13 +108,17 @@ claude-accounts current
 
 ```bash
 claude-accounts remove personal
-# Remove account 'personal'? [y/N] y
+# Remove account 'personal' and all its data? [y/N] y
 ```
+
+## Migrating from the Old Format
+
+If you used an earlier version of this script that stored flat `.json` files in `~/.claude-accounts/`, the `list` and `use` commands will automatically migrate them to the new directory structure. The active account at the time of migration keeps its data; other accounts start with a fresh data directory.
 
 ## Notes
 
-- Every time you run `use`, your current `~/.claude.json` is backed up to `~/.claude.json.backup` before switching.
-- The `add` command temporarily strips auth keys from `~/.claude.json` (using `jq`) to force a fresh login, while preserving other Claude settings like theme and preferences.
-- If `jq` is not installed, `add` falls back to wiping `~/.claude.json` entirely before prompting for login.
-- On `use`, the current account's stats are saved before switching, so each account maintains its own independent usage history.
-- Profile files contain credentials — keep `~/.claude-accounts/` private and do not commit it to version control.
+- **Close Claude Code before switching accounts** to avoid any in-flight data being written to the wrong account's directory.
+- The first `save` command converts `~/.claude.json` and `~/.claude/` from real files to symlinks. This is transparent to Claude Code.
+- You cannot remove the currently active account — switch to another one first.
+- Account names must contain only letters, numbers, hyphens, and underscores.
+- Profile directories contain credentials — keep `~/.claude-accounts/` private and do not commit it to version control.
