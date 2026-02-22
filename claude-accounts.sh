@@ -2,14 +2,18 @@
 # claude-accounts — manage multiple Claude Code CLI accounts
 #
 # Each account gets a fully isolated directory containing both credentials
-# (~/.claude.json) and all Claude data (~/.claude/), so history, telemetry,
-# usage stats, and session data never leak between accounts.
+# and all Claude data, so history, telemetry, usage stats, and session data
+# never leak between accounts.
 #
-# Layout after first `save`:
-#   ~/.claude-accounts/<name>/config.json  ← credentials (was ~/.claude.json)
-#   ~/.claude-accounts/<name>/data/        ← all Claude data (was ~/.claude/)
-#   ~/.claude.json  → symlink to active account's config.json
-#   ~/.claude       → symlink to active account's data/
+# Layout:
+#   ~/.claude-accounts/<name>/data/              ← all account data
+#   ~/.claude-accounts/<name>/data/.claude.json  ← credentials
+#
+# Usage via CLAUDE_CONFIG_DIR (multiple accounts at the same time):
+#   CLAUDE_CONFIG_DIR=~/.claude-accounts/<name>/data claude
+#
+# Bare `claude` (no env var) still works using ~/.claude.json + ~/.claude/
+# as an unmanaged fallback.
 #
 # Usage: claude-accounts <command> [name]
 
@@ -31,9 +35,9 @@ mkdir -p "$PROFILES_DIR"
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 account_dir()    { echo "${PROFILES_DIR}/${1}"; }
-current_account() { [[ -f "${PROFILES_DIR}/.current" ]] && cat "${PROFILES_DIR}/.current" || echo ""; }
-set_current()    { echo "$1" > "${PROFILES_DIR}/.current"; }
-account_exists() { [[ -d "$(account_dir "$1")" && -f "$(account_dir "$1")/config.json" ]]; }
+account_data()   { echo "${PROFILES_DIR}/${1}/data"; }
+account_config() { echo "${PROFILES_DIR}/${1}/data/.claude.json"; }
+account_exists() { [[ -d "$(account_data "$1")" && -f "$(account_config "$1")" ]]; }
 
 require_name() {
   if [[ -z "${1:-}" ]]; then
@@ -47,56 +51,80 @@ require_name() {
   fi
 }
 
-# Point ~/.claude.json and ~/.claude symlinks to an account's directory
-activate_symlinks() {
-  local name="$1"
-  local acct
-  acct=$(account_dir "$name")
-
-  # Remove old symlinks
-  [[ -L "$CLAUDE_JSON" ]] && rm -f "$CLAUDE_JSON"
-  [[ -L "$CLAUDE_DIR" ]]  && rm -f "$CLAUDE_DIR"
-
-  ln -s "${acct}/config.json" "$CLAUDE_JSON"
-  ln -s "${acct}/data"        "$CLAUDE_DIR"
-  set_current "$name"
-}
-
-# Ensure symlinks are in place (save must be run first)
-require_symlink_mode() {
-  if [[ -e "$CLAUDE_JSON" && ! -L "$CLAUDE_JSON" ]] || \
-     [[ -e "$CLAUDE_DIR"  && ! -L "$CLAUDE_DIR" ]]; then
-    echo -e "${RED}Error:${RESET} Account switching is not set up yet."
-    echo "  Run '$(basename "$0") save <name>' first to save your current login."
-    exit 1
-  fi
-}
-
-# Migrate old flat-file profiles (*.json) to new directory structure
-maybe_migrate_old_format() {
+# Migrate old formats to current directory structure
+maybe_migrate() {
   local migrated=false
 
+  # Phase 0: Restore symlinks left by previous versions
+  # If ~/.claude.json or ~/.claude are symlinks (from the old global-switch mode),
+  # replace them with real copies so bare `claude` keeps working.
+  if [[ -L "$CLAUDE_JSON" ]]; then
+    local target
+    target=$(readlink "$CLAUDE_JSON")
+    if [[ -f "$target" ]]; then
+      cp "$target" "${CLAUDE_JSON}.tmp"
+      rm -f "$CLAUDE_JSON"
+      mv "${CLAUDE_JSON}.tmp" "$CLAUDE_JSON"
+      migrated=true
+      echo -e "${CYAN}Restored${RESET} ~/.claude.json from symlink."
+    else
+      rm -f "$CLAUDE_JSON"
+      migrated=true
+      echo -e "${CYAN}Removed${RESET} dangling symlink ~/.claude.json."
+    fi
+  fi
+  if [[ -L "$CLAUDE_DIR" ]]; then
+    local target
+    target=$(readlink "$CLAUDE_DIR")
+    if [[ -d "$target" ]]; then
+      cp -a "$target" "${CLAUDE_DIR}.tmp"
+      rm -f "$CLAUDE_DIR"
+      mv "${CLAUDE_DIR}.tmp" "$CLAUDE_DIR"
+      migrated=true
+      echo -e "${CYAN}Restored${RESET} ~/.claude/ from symlink."
+    else
+      rm -f "$CLAUDE_DIR"
+      migrated=true
+      echo -e "${CYAN}Removed${RESET} dangling symlink ~/.claude/."
+    fi
+  fi
+
+  # Clean up old .current marker file
+  if [[ -f "${PROFILES_DIR}/.current" ]]; then
+    rm -f "${PROFILES_DIR}/.current"
+  fi
+
+  # Phase 1: Migrate flat-file profiles (v1: *.json files in profiles dir)
   for f in "${PROFILES_DIR}"/*.json; do
     [[ -f "$f" ]] || continue
     local base
     base=$(basename "$f" .json)
-
-    # Skip stats-cache files
     [[ "$base" == *.stats-cache ]] && continue
-
-    # Skip if already migrated
     [[ -d "${PROFILES_DIR}/${base}" ]] && continue
 
     migrated=true
     echo -e "${CYAN}Migrating${RESET} old profile '${base}' to new format..."
     mkdir -p "${PROFILES_DIR}/${base}/data"
-    mv "$f" "${PROFILES_DIR}/${base}/config.json"
+    mv "$f" "${PROFILES_DIR}/${base}/data/.claude.json"
     rm -f "${PROFILES_DIR}/${base}.stats-cache.json"
   done
 
-  # Clean up any remaining stats-cache files
+  # Clean up remaining stats-cache files
   for f in "${PROFILES_DIR}"/*.stats-cache.json; do
     [[ -f "$f" ]] && rm -f "$f"
+  done
+
+  # Phase 2: Migrate v2 format (config.json outside data/) to v3 (inside data/)
+  for d in "${PROFILES_DIR}"/*/; do
+    [[ -d "$d" ]] || continue
+    if [[ -f "${d}config.json" && ! -f "${d}data/.claude.json" ]]; then
+      migrated=true
+      local n
+      n=$(basename "$d")
+      echo -e "${CYAN}Migrating${RESET} account '${n}' config into data directory..."
+      mkdir -p "${d}data"
+      mv "${d}config.json" "${d}data/.claude.json"
+    fi
   done
 
   if $migrated; then
@@ -120,55 +148,28 @@ cmd_save() {
     rm -rf "$acct"
   fi
 
-  mkdir -p "$acct"
+  mkdir -p "${acct}/data"
 
-  if [[ -L "$CLAUDE_JSON" ]] && [[ -L "$CLAUDE_DIR" ]]; then
-    # Already in symlink mode — copy current data to new account
-    cp -L "$CLAUDE_JSON" "${acct}/config.json"
-    cp -a "$(readlink "$CLAUDE_DIR")" "${acct}/data"
-    activate_symlinks "$name"
+  # If ~/.claude.json or ~/.claude are symlinks (old version), resolve them first
+  local src_json="$CLAUDE_JSON"
+  local src_dir="$CLAUDE_DIR"
+  [[ -L "$src_json" ]] && src_json=$(readlink "$src_json")
+  [[ -L "$src_dir" ]]  && src_dir=$(readlink "$src_dir")
+
+  # Copy data directory contents
+  if [[ -d "$src_dir" ]]; then
+    cp -a "${src_dir}/." "${acct}/data/"
+  fi
+
+  # Copy credentials
+  if [[ -f "$src_json" ]]; then
+    cp "$src_json" "${acct}/data/.claude.json"
   else
-    # First-time setup: move real files into account directory + create symlinks
-    if [[ -f "$CLAUDE_JSON" ]]; then
-      mv "$CLAUDE_JSON" "${acct}/config.json"
-    else
-      echo '{}' > "${acct}/config.json"
-    fi
-
-    if [[ -d "$CLAUDE_DIR" ]]; then
-      mv "$CLAUDE_DIR" "${acct}/data"
-    else
-      mkdir -p "${acct}/data"
-    fi
-
-    activate_symlinks "$name"
+    echo '{}' > "${acct}/data/.claude.json"
   fi
 
   echo -e "${GREEN}Saved${RESET} current login as '${BOLD}${name}${RESET}'."
-}
-
-cmd_use() {
-  require_name "${1:-}" "use"
-  local name="$1"
-
-  maybe_migrate_old_format
-
-  if ! account_exists "$name"; then
-    echo -e "${RED}Error:${RESET} No account named '${name}'."
-    echo "  Run '$(basename "$0") list' to see available accounts."
-    exit 1
-  fi
-
-  local current
-  current=$(current_account)
-  if [[ "$current" == "$name" ]]; then
-    echo -e "Already on account '${BOLD}${name}${RESET}'."
-    return
-  fi
-
-  require_symlink_mode
-  activate_symlinks "$name"
-  echo -e "${GREEN}Switched${RESET} to account '${BOLD}${name}${RESET}'."
+  echo -e "  Use it with:  $(basename "$0") run ${name}"
 }
 
 cmd_add() {
@@ -182,61 +183,83 @@ cmd_add() {
     rm -rf "$(account_dir "$name")"
   fi
 
-  require_symlink_mode
-
   local acct
   acct=$(account_dir "$name")
   mkdir -p "${acct}/data"
-  echo '{}' > "${acct}/config.json"
+  echo '{}' > "${acct}/data/.claude.json"
 
   echo -e "${CYAN}Starting Claude Code for login.${RESET}"
   echo -e "Sign in with your desired account, then type ${BOLD}/exit${RESET} or press Ctrl+C.\n"
   read -rp "Press ENTER to continue..."
 
-  # Remember current account in case login fails
-  local prev
-  prev=$(current_account)
-
-  # Switch to the new empty account
-  activate_symlinks "$name"
-
-  claude || true
+  # Launch claude with the new account's config dir
+  CLAUDE_CONFIG_DIR="${acct}/data" claude || true
 
   # Check if login succeeded
   local login_ok=true
   if command -v jq &>/dev/null; then
-    if ! jq -e '.oauthAccount' "${acct}/config.json" &>/dev/null; then
+    if ! jq -e '.oauthAccount' "$(account_config "$name")" &>/dev/null; then
       login_ok=false
     fi
-  elif [[ ! -s "${acct}/config.json" ]] || [[ "$(cat "${acct}/config.json")" == "{}" ]]; then
+  elif [[ ! -s "$(account_config "$name")" ]] || [[ "$(cat "$(account_config "$name")")" == "{}" ]]; then
     login_ok=false
   fi
 
   if ! $login_ok; then
     echo -e "\n${YELLOW}Warning:${RESET} No credentials detected. Did you complete the login?"
-    # Roll back to previous account
-    if [[ -n "$prev" ]] && account_exists "$prev"; then
-      activate_symlinks "$prev"
-      echo -e "  Switched back to '${prev}'."
-    fi
     rm -rf "$acct"
     return 1
   fi
 
   echo -e "\n${GREEN}Account '${BOLD}${name}${RESET}${GREEN}' saved.${RESET}"
+  echo -e "  Use it with:  $(basename "$0") run ${name}"
+}
+
+cmd_env() {
+  require_name "${1:-}" "env"
+  local name="$1"
+
+  maybe_migrate
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Error:${RESET} No account named '${name}'." >&2
+    exit 1
+  fi
+
+  local data
+  data=$(account_data "$name")
+
+  # Output export statement for eval
+  echo "export CLAUDE_CONFIG_DIR=\"${data}\""
+}
+
+cmd_run() {
+  require_name "${1:-}" "run"
+  local name="$1"
+  shift
+
+  maybe_migrate
+
+  if ! account_exists "$name"; then
+    echo -e "${RED}Error:${RESET} No account named '${name}'." >&2
+    exit 1
+  fi
+
+  local data
+  data=$(account_data "$name")
+
+  # Launch claude with the account's config dir
+  CLAUDE_CONFIG_DIR="${data}" exec claude "$@"
 }
 
 cmd_list() {
-  maybe_migrate_old_format
+  maybe_migrate
 
-  local current
-  current=$(current_account)
   local found=false
 
   for d in "${PROFILES_DIR}"/*/; do
     [[ -d "$d" ]] || continue
-    # Only count directories that have a config.json (valid accounts)
-    [[ -f "${d}config.json" ]] || continue
+    [[ -f "${d}data/.claude.json" ]] || continue
     found=true
     break
   done
@@ -250,14 +273,10 @@ cmd_list() {
   echo -e "${BOLD}Saved accounts:${RESET}"
   for d in "${PROFILES_DIR}"/*/; do
     [[ -d "$d" ]] || continue
-    [[ -f "${d}config.json" ]] || continue
+    [[ -f "${d}data/.claude.json" ]] || continue
     local name
     name=$(basename "$d")
-    if [[ "$name" == "$current" ]]; then
-      echo -e "  ${GREEN}* ${name}${RESET}  (active)"
-    else
-      echo -e "  ${CYAN}  ${name}${RESET}"
-    fi
+    echo -e "  ${CYAN}${name}${RESET}"
   done
 }
 
@@ -270,27 +289,11 @@ cmd_remove() {
     exit 1
   fi
 
-  if [[ "$(current_account)" == "$name" ]]; then
-    echo -e "${RED}Error:${RESET} Cannot remove the active account."
-    echo "  Switch to another account first:  $(basename "$0") use <other>"
-    exit 1
-  fi
-
   read -rp "Remove account '${name}' and all its data? [y/N] " confirm
   [[ "$(echo "$confirm" | tr '[:upper:]' '[:lower:]')" != "y" ]] && { echo "Aborted."; exit 0; }
 
   rm -rf "$(account_dir "$name")"
   echo -e "${GREEN}Removed${RESET} account '${name}'."
-}
-
-cmd_current() {
-  local c
-  c=$(current_account)
-  if [[ -z "$c" ]]; then
-    echo -e "${YELLOW}No active account.${RESET} Run '$(basename "$0") save <name>' to get started."
-  else
-    echo -e "Active account: ${GREEN}${BOLD}${c}${RESET}"
-  fi
 }
 
 cmd_help() {
@@ -300,26 +303,35 @@ cmd_help() {
   echo "  $(basename "$0") <command> [name]"
   echo ""
   echo -e "${BOLD}Commands:${RESET}"
-  echo -e "  ${CYAN}save <name>${RESET}    Save current login as <name> (run this first!)"
-  echo -e "  ${CYAN}use  <name>${RESET}    Switch to a saved account"
-  echo -e "  ${CYAN}add  <name>${RESET}    Log in with a new account and save it"
-  echo -e "  ${CYAN}list${RESET}           Show all saved accounts"
-  echo -e "  ${CYAN}current${RESET}        Show the active account"
-  echo -e "  ${CYAN}remove <name>${RESET}  Delete a saved account and its data"
+  echo -e "  ${CYAN}save <name>${RESET}        Save current login as <name> (run this first!)"
+  echo -e "  ${CYAN}add  <name>${RESET}        Log in with a new account and save it"
+  echo -e "  ${CYAN}list${RESET}               Show all saved accounts"
+  echo -e "  ${CYAN}remove <name>${RESET}      Delete a saved account and its data"
+  echo -e "  ${CYAN}env  <name>${RESET}        Print export for per-terminal use"
+  echo -e "  ${CYAN}run  <name> [...]${RESET}  Run claude with a specific account"
   echo ""
   echo -e "${BOLD}First-time setup:${RESET}"
-  echo "  1. $(basename "$0") save work        # saves your current login"
+  echo "  1. $(basename "$0") save work        # copies your current login into an account"
   echo "  2. $(basename "$0") add personal     # log in with another account"
-  echo "  3. $(basename "$0") use work         # switch between accounts"
+  echo "  3. $(basename "$0") run work         # launch claude as 'work'"
+  echo ""
+  echo -e "${BOLD}Usage:${RESET}"
+  echo "  # Option 1: set env in current shell"
+  echo "  eval \"\$($(basename "$0") env work)\""
+  echo "  claude"
+  echo ""
+  echo "  # Option 2: one-liner"
+  echo "  $(basename "$0") run personal"
+  echo "  $(basename "$0") run personal -p \"hello\""
   echo ""
   echo -e "${BOLD}How it works:${RESET}"
   echo "  Each account gets a fully isolated directory with its own credentials,"
-  echo "  history, settings, and usage data. Switching accounts changes symlinks"
-  echo "  so nothing is shared between accounts."
+  echo "  history, settings, and usage data. Accounts are launched via the"
+  echo "  CLAUDE_CONFIG_DIR env var, so multiple accounts can run simultaneously"
+  echo "  in different terminals."
   echo ""
-  echo -e "${BOLD}Layout:${RESET}"
-  echo "  ~/.claude.json  → symlink → ~/.claude-accounts/<name>/config.json"
-  echo "  ~/.claude/      → symlink → ~/.claude-accounts/<name>/data/"
+  echo "  Bare 'claude' (without run/env) still works using your original"
+  echo "  ~/.claude.json and ~/.claude/ as an unmanaged fallback."
   echo ""
   echo -e "${BOLD}Profiles stored in:${RESET} ~/.claude-accounts/"
 }
@@ -328,11 +340,11 @@ cmd_help() {
 
 case "${1:-help}" in
   save)    cmd_save    "${2:-}" ;;
-  use)     cmd_use     "${2:-}" ;;
   add)     cmd_add     "${2:-}" ;;
   list)    cmd_list ;;
   remove)  cmd_remove  "${2:-}" ;;
-  current) cmd_current ;;
+  env)     cmd_env     "${2:-}" ;;
+  run)     shift; cmd_run "$@" ;;
   help|--help|-h) cmd_help ;;
   *)
     echo -e "${RED}Unknown command:${RESET} ${1}"
