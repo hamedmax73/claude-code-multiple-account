@@ -65,6 +65,8 @@ source ~/.zshrc
 | `remove <name>` | Delete a saved account and all its data |
 | `env <name>` | Print `export` statement for per-terminal use |
 | `run <name> [...]` | Run claude directly with a specific account |
+| `sessions <name> [limit]` | List sessions, most recent last (default: 20) |
+| `copy-session <from> <to> [id]` | Copy a session from one account to another |
 
 ## Usage
 
@@ -126,6 +128,24 @@ claude-accounts list
 
 ```bash
 claude-accounts remove personal
+```
+
+### Share a session between accounts
+
+Useful when you hit your usage limit on one account and want to continue the same conversation on another.
+
+```bash
+# List sessions in an account (shows session IDs, project, and last modified date)
+claude-accounts sessions work
+
+# Copy a specific session from work → personal
+claude-accounts copy-session work personal <session-id>
+
+# Omit the session ID to pick interactively from a numbered list
+claude-accounts copy-session work personal
+
+# Then resume the copied session on the destination account
+claude-accounts run personal --continue <session-id>
 ```
 
 ## Migrating from Older Versions
